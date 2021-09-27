@@ -410,14 +410,14 @@ def _collect_bundle_imports(rule_attr):
     return bundle_paths + unprocessed_bundle_resources
 
 def _collect_unprocessed_resource_files(target):
-    obj = target
-    ari = obj[AppleResourceInfo]
     resources = []
-    if not hasattr(ari, "unprocessed"):
-        return []
-    for info in ari.unprocessed:
-        for f in info[2].to_list():
-            resources.append(_file_metadata(f))
+    if AppleResourceInfo in target:
+        ari = target[AppleResourceInfo]
+        if not hasattr(ari, "unprocessed"):
+            return []
+        for info in ari.unprocessed:
+            for f in info[2].to_list():
+                resources.append(_file_metadata(f))
     return resources
 
 def _collect_framework_imports(rule_attr):
