@@ -220,16 +220,32 @@ def _is_bazel_external_file(f):
     """Returns True if the given file is a Bazel external file."""
     return f.path.startswith("external/")
 
+def _is_file_a_directory(f):
+    """Returns True is the given file is a directory."""
+    # Starting Bazel 3.3.0, the File type as a is_directory attribute.
+    if getattr(f, "is_directory", None):
+        return f.is_directory
+    # If is_directory is not in the File type, fall back to the old method:
+    # As of Oct. 2016, Bazel disallows most files without extensions.
+    # As a temporary hack, Tulsi treats File instances pointing at extension-less
+    # paths as directories. This is extremely fragile and must be replaced with
+    # logic properly homed in Bazel.
+    return (f.basename.find(".") == -1)
+
+def _is_file_external(f):
+    """Returns True if the given file is an external file."""
+    return f.owner.workspace_root != ""
+
 def _file_metadata(f):
     """Returns metadata about a given File."""
     if not f:
         return None
 
-    # Special case handling for Bazel external files which have a path that starts
-    # with 'external/' but their short_path and root.path have no mention of being
-    # external.
-    out_path = f.path if _is_bazel_external_file(f) else f.short_path
-    if not f.is_source:
+    # Special case handling for external files.
+    is_external = _is_file_external(f)
+
+    out_path = f.path if is_external else f.short_path
+    if not f.is_source and not is_external:
         root_path = f.root.path
         symlink_path = _convert_outpath_to_symlink_path(root_path)
         if symlink_path == root_path:
@@ -242,17 +258,11 @@ def _file_metadata(f):
     else:
         root_execution_path_fragment = None
 
-    # At the moment (Oct. 2016), Bazel disallows most files without extensions.
-    # As a temporary hack, Tulsi treats File instances pointing at extension-less
-    # paths as directories. This is extremely fragile and must be replaced with
-    # logic properly homed in Bazel.
-    is_dir = (f.basename.find(".") == -1)
-
     return _struct_omitting_none(
         path = out_path,
         src = f.is_source,
         root = root_execution_path_fragment,
-        is_dir = is_dir,
+        is_dir = _is_file_a_directory(f),
     )
 
 def _file_metadata_by_replacing_path(f, new_path, new_is_dir = None):
@@ -396,7 +406,7 @@ def _collect_asset_catalogs(rule_attr):
 
 def _collect_bundle_imports(rule_attr):
     """Extracts bundle directories from the given rule attributes."""
-    
+
     bundle_paths = _collect_bundle_paths(
         rule_attr,
         ["bundle_imports", "settings_bundle"],
@@ -708,7 +718,7 @@ def _collect_module_maps(target):
     return [
         module.clang.module_map
         for module in target[SwiftInfo].transitive_modules.to_list()
-        if module.clang
+        if module.clang and type(module.clang.module_map) == "File"
     ]
 
 def _collect_objc_strict_includes(target, rule_attr):
@@ -729,6 +739,27 @@ def _collect_swift_header(target):
     if SwiftInfo in target and CcInfo in target:
         return target[CcInfo].compilation_context.headers
     return depset()
+
+def collect_swift_version(copts):
+    """Returns the value of the `-swift-version` argument, if found.
+    Args:
+        copts: The list of copts to be scanned.
+    Returns:
+        The value of the `-swift-version` argument, or None if it was not found
+        in the copt list.
+    """
+
+    # Note that the argument can occur multiple times, and the last one wins.
+    last_swift_version = None
+
+    count = len(copts)
+    for i in range(count):
+        copt = copts[i]
+        if copt == "-swift-version" and i + 1 < count:
+            last_swift_version = copts[i + 1]
+
+    return last_swift_version
+
 
 def _target_filtering_info(ctx):
     """Returns filtering information for test rules."""
@@ -913,9 +944,15 @@ def _tulsi_sources_aspect(target, ctx):
     if is_swift_target:
         swift_info = target[SwiftInfo]
         attributes["has_swift_info"] = True
-        transitive_attributes["swift_language_version"] = swift_info.swift_version
+        swift_version = collect_swift_version(copts_attr) if is_swift_library else None
         transitive_attributes["has_swift_dependency"] = True
-        swift_defines = swift_info.transitive_defines.to_list()
+        defines = {}
+        for module in target[SwiftInfo].transitive_modules.to_list():
+            swift_module = module.swift
+            if swift_module and swift_module.defines:
+                for x in swift_module.defines:
+                    defines[x] = None
+        swift_defines = defines.keys()
 
     all_attributes = dict(attributes)
     all_attributes.update(inheritable_attributes)
