@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 # Copyright 2016 The Tulsi Authors. All rights reserved.
 #
@@ -745,10 +745,12 @@ class BazelBuildBridge(object):
 
     # Capture the stderr and stdout from Bazel. We only display it if it we're
     # unable to read any BEP events.
-    process = subprocess.Popen(command,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT,
-                               bufsize=1)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        bufsize=1)
 
     # Register atexit function to clean up BEP file.
     atexit.register(_BEPFileExitCleanup, self.build_events_file_path)
@@ -807,7 +809,8 @@ class BazelBuildBridge(object):
     outputs_data = []
     for output_file in output_files:
       try:
-        output_data = json.load(open(output_file))
+        with io.open(output_file, 'rb') as f:
+          output_data = json.load(f)
       except (ValueError, IOError) as e:
         _PrintXcodeError('Failed to load output map ""%s". '
                          '%s' % (output_file, e))
@@ -1202,7 +1205,7 @@ class BazelBuildBridge(object):
 
         # If the archive item looks like a file, extract it.
         if not filename.endswith(os.sep):
-          with zf.open(item) as src, file(target_path, 'wb') as dst:
+          with zf.open(item) as src, open(target_path, 'wb') as dst:
             shutil.copyfileobj(src, dst)
 
         # Patch up the extracted file's attributes to match the zip content.
@@ -1368,7 +1371,8 @@ class BazelBuildBridge(object):
     if os.path.exists(output_file):
       os.remove(output_file)
 
-    with open(self.runner_entitlements_template, 'r') as template:
+    with io.open(
+        self.runner_entitlements_template, 'r', encoding='utf-8') as template:
       contents = template.read()
       contents = contents.replace(
           '$(TeamIdentifier)',
@@ -1403,11 +1407,10 @@ class BazelBuildBridge(object):
 
     timer = Timer('\tExtracting signature for ' + signed_bundle,
                   'extracting_signature').Start()
-    output = subprocess.check_output(['xcrun',
-                                      'codesign',
-                                      '-dvv',
-                                      signed_bundle],
-                                     stderr=subprocess.STDOUT)
+    output = subprocess.check_output(
+        ['xcrun', 'codesign', '-dvv', signed_bundle],
+        stderr=subprocess.STDOUT,
+        encoding='utf-8')
     timer.End()
 
     bundle_attributes = CodesignBundleAttributes(output)
@@ -1491,12 +1494,8 @@ class BazelBuildBridge(object):
                               given architecture, if no error has occcured.
     """
 
-    returncode, output = self._RunSubprocess([
-        'xcrun',
-        'dwarfdump',
-        '--uuid',
-        source_binary_path
-    ])
+    returncode, output = self._RunSubprocess(
+        ['xcrun', 'dwarfdump', '--uuid', source_binary_path])
     if returncode:
       _PrintXcodeWarning('dwarfdump returned %d while finding the UUID for %s'
                          % (returncode, source_binary_path))
@@ -1707,9 +1706,8 @@ class BazelBuildBridge(object):
   def _RunSubprocess(self, cmd):
     """Runs the given command as a subprocess, returning (exit_code, output)."""
     self._PrintVerbose('%r' % cmd, 1)
-    process = subprocess.Popen(cmd,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8')
     output, _ = process.communicate()
     return (process.returncode, output)
 
