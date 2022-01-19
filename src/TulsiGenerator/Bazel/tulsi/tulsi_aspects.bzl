@@ -20,10 +20,12 @@ project and pass it back to Tulsi.
 
 load(
     ":tulsi/tulsi_aspects_paths.bzl",
+    "AppleBinaryInfo",
     "AppleBundleInfo",
     "AppleTestInfo",
     "AppleResourceInfo",
     "AppleResourceBundleInfo",
+    "IosApplicationBundleInfo",
     "IosExtensionBundleInfo",
     "SwiftInfo",
 )
@@ -48,6 +50,7 @@ UNSUPPORTED_FEATURES = [
 # objc_binary rule which in turn might have objc_library's in its "deps"
 # attribute.
 _TULSI_COMPILE_DEPS = [
+    "app_clips",  # For ios_application which can include app clips.
     "bundles",
     "deps",
     "extension",
@@ -101,7 +104,7 @@ _NON_ARC_SOURCE_GENERATING_RULES = [
     "objc_proto_library",
 ]
 
-# Whitelist of all extensions to include when scanning target.files for generated
+# List of all extensions to include when scanning target.files for generated
 # files. This helps avoid but not prevent the following:
 #
 # _tulsi-include maps generated files from multiple configurations into one
@@ -215,10 +218,6 @@ def _convert_outpath_to_symlink_path(path):
         first_dash < len(components[0])):
         return "bazel-tulsi-includes/x/x/" + "/".join(components[3:])
     return path
-
-def _is_bazel_external_file(f):
-    """Returns True if the given file is a Bazel external file."""
-    return f.path.startswith("external/")
 
 def _is_file_a_directory(f):
     """Returns True is the given file is a directory."""
@@ -742,8 +741,10 @@ def _collect_swift_header(target):
 
 def collect_swift_version(copts):
     """Returns the value of the `-swift-version` argument, if found.
+
     Args:
         copts: The list of copts to be scanned.
+
     Returns:
         The value of the `-swift-version` argument, or None if it was not found
         in the copt list.
@@ -759,7 +760,6 @@ def collect_swift_version(copts):
             last_swift_version = copts[i + 1]
 
     return last_swift_version
-
 
 def _target_filtering_info(ctx):
     """Returns filtering information for test rules."""
@@ -911,6 +911,11 @@ def _tulsi_sources_aspect(target, ctx):
         if watch_app:
             extensions.append(watch_app)
 
+    # Collect app clips for iOS app targets
+    app_clips = None
+    if IosApplicationBundleInfo in target:
+        app_clips = [str(t.label) for t in _getattr_as_list(rule_attr, "app_clips")]
+
     # Record the Xcode version used for all targets, although it will only be used by bazel_build.py
     # for targets that are buildable in the xcodeproj.
     xcode_version = _get_xcode_version(ctx)
@@ -942,9 +947,9 @@ def _tulsi_sources_aspect(target, ctx):
     swift_defines = []
 
     if is_swift_target:
-        swift_info = target[SwiftInfo]
         attributes["has_swift_info"] = True
         swift_version = collect_swift_version(copts_attr) if is_swift_library else None
+        transitive_attributes["swift_language_version"] = swift_version
         transitive_attributes["has_swift_dependency"] = True
         defines = {}
         for module in target[SwiftInfo].transitive_modules.to_list():
@@ -975,10 +980,12 @@ def _tulsi_sources_aspect(target, ctx):
         includes_depsets = [objc_strict_includes]
 
     if includes_depsets:
-        target_includes = [
+        # Use a depset here to remove duplicates which is possible since
+        # converting the output path can strip some path information.
+        target_includes = depset([
             _convert_outpath_to_symlink_path(x)
             for x in depset(transitive = includes_depsets).to_list()
-        ]
+        ]).to_list()
     else:
         target_includes = []
 
@@ -1021,6 +1028,7 @@ def _tulsi_sources_aspect(target, ctx):
         deps = compile_deps,
         test_deps = test_deps,
         extensions = extensions,
+        app_clips = app_clips,
         framework_imports = _collect_framework_imports(rule_attr),
         generated_files = generated_files,
         generated_non_arc_files = generated_non_arc_files,
@@ -1062,19 +1070,41 @@ def _tulsi_sources_aspect(target, ctx):
         ),
     ]
 
+def _bundle_dsym_path(apple_bundle):
+    """Compute the dSYM path for the bundle.
+
+    Due to b/110264170 dSYMs are not fully exposed via a provider. We instead
+    rely on the fact that `rules_apple` puts them next to the bundle just like
+    Xcode.
+    """
+    bin_path = apple_bundle.archive.dirname
+    dsym_name = apple_bundle.bundle_name + apple_bundle.bundle_extension + ".dSYM"
+    return bin_path + "/" + dsym_name
+
 def _collect_bundle_info(target):
     """Returns Apple bundle info for the given target, None if not a bundle."""
     if AppleBundleInfo in target:
         apple_bundle = target[AppleBundleInfo]
-        has_dsym = (apple_common.AppleDebugOutputs in target)
+        has_dsym = _has_dsym(target)
         return struct(
             archive_root = apple_bundle.archive_root,
+            dsym_path = _bundle_dsym_path(apple_bundle),
             bundle_name = apple_bundle.bundle_name,
             bundle_extension = apple_bundle.bundle_extension,
             has_dsym = has_dsym,
         )
 
     return None
+
+def _has_dsym(target):
+    """Returns True if the given target provides dSYM, otherwise False."""
+    if apple_common.AppleDebugOutputs in target:
+        debug_outputs_provider = target[apple_common.AppleDebugOutputs]
+        outputs_map = debug_outputs_provider.outputs_map
+        for _, arch_outputs in outputs_map.items():
+            if "dsym_binary" in arch_outputs:
+                return True
+    return False
 
 # Due to b/71744111 we have to manually re-create tag filtering for test_suite
 # rules.
@@ -1185,6 +1215,7 @@ def _tulsi_outputs_aspect(target, ctx):
     embedded_bundles = depset(direct_embedded_bundles, transitive = transitive_embedded_bundles)
 
     artifact = None
+    dsym_path = None
     bundle_name = None
     archive_root = None
     infoplist = None
@@ -1192,35 +1223,41 @@ def _tulsi_outputs_aspect(target, ctx):
         bundle_info = target[AppleBundleInfo]
 
         artifact = bundle_info.archive.path
+        dsym_path = _bundle_dsym_path(bundle_info)
         archive_root = bundle_info.archive_root
         infoplist = bundle_info.infoplist
 
         bundle_name = bundle_info.bundle_name
-    elif (target_kind == "macos_command_line_application" or
-          target_kind == "cc_binary" or target_kind == "cc_test"):
-        # Special support for macos_command_line_application and cc_* targets
-        # which do not have an AppleBundleInfo provider.
-
-        # Both the dSYM binary and executable binary don't have an extension, so
-        # pick the first extension-less file not in a DWARF folder.
+    elif AppleBinaryInfo in target:
+        # Support for non-bundled binary targets such as
+        # `macos_command_line_application`. These still have dSYMs support and
+        # should be located next to the binary.
+        artifact = target[AppleBinaryInfo].binary.path
+        dsym_path = artifact + ".dSYM"
+    elif (target_kind == "cc_binary" or target_kind == "cc_test"):
+        # Special support for cc_* targets which do not have AppleBinaryInfo or
+        # AppleBundleInfo providers.
+        #
+        # At the moment these don't have support for dSYMs (b/124859331), but
+        # in case they do in the future we filter out the dSYM files.
         artifacts = [
-            x.path
+            x
             for x in target.files.to_list()
             if x.extension == "" and
                "Contents/Resources/DWARF" not in x.path
         ]
         if len(artifacts) > 0:
-            artifact = artifacts[0]
+            artifact = artifacts[0].path
     else:
         # Special support for *_library targets, which Tulsi allows building at
         # the top-level.
         artifacts = [
-            x.path
+            x
             for x in target.files.to_list()
             if x.extension == "a"
         ]
         if len(artifacts) > 0:
-            artifact = artifacts[0]
+            artifact = artifacts[0].path
 
     # Collect generated files for bazel_build.py to copy under Tulsi root.
     all_files_depsets = []
@@ -1257,15 +1294,12 @@ def _tulsi_outputs_aspect(target, ctx):
         transitive = transitive_generated_files,
     )
 
-    has_dsym = False
-    if hasattr(ctx.fragments, "objc"):
-        # Check the fragment directly, as macos_command_line_application does not
-        # propagate apple_common.AppleDebugOutputs.
-        has_dsym = ctx.fragments.objc.generate_dsym
+    has_dsym = _has_dsym(target)
 
     info = _struct_omitting_none(
         artifact = artifact,
         archive_root = archive_root,
+        dsym_path = dsym_path,
         generated_sources = [(x.path, x.short_path) for x in generated_files.to_list()],
         bundle_name = bundle_name,
         embedded_bundles = embedded_bundles.to_list(),
@@ -1295,6 +1329,7 @@ tulsi_sources_aspect = aspect(
         )),
     },
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
+    incompatible_use_toolchain_transition = True,
     fragments = [
         "apple",
         "cpp",
