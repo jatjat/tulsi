@@ -1066,7 +1066,7 @@ def _collect_bundle_info(target):
     """Returns Apple bundle info for the given target, None if not a bundle."""
     if AppleBundleInfo in target:
         apple_bundle = target[AppleBundleInfo]
-        has_dsym = (apple_common.AppleDebugOutputs in target)
+        has_dsym = _has_dsym(target)
         return struct(
             archive_root = apple_bundle.archive_root,
             bundle_name = apple_bundle.bundle_name,
@@ -1075,6 +1075,17 @@ def _collect_bundle_info(target):
         )
 
     return None
+
+def _has_dsym(target):
+    """Returns True if the given target provides dSYM, otherwise False."""
+    if apple_common.AppleDebugOutputs in target:
+        debug_outputs_provider = target[apple_common.AppleDebugOutputs]
+        outputs_map = debug_outputs_provider.outputs_map
+        for _, arch_outputs in outputs_map.items():
+            if "dsym_binary" in arch_outputs:
+                return True
+    return False
+
 
 # Due to b/71744111 we have to manually re-create tag filtering for test_suite
 # rules.
@@ -1257,11 +1268,7 @@ def _tulsi_outputs_aspect(target, ctx):
         transitive = transitive_generated_files,
     )
 
-    has_dsym = False
-    if hasattr(ctx.fragments, "objc"):
-        # Check the fragment directly, as macos_command_line_application does not
-        # propagate apple_common.AppleDebugOutputs.
-        has_dsym = ctx.fragments.objc.generate_dsym
+    has_dsym = _has_dsym(target)
 
     info = _struct_omitting_none(
         artifact = artifact,
