@@ -25,6 +25,7 @@ import io
 import json
 import os
 import pipes
+import plistlib
 import re
 import shutil
 import signal
@@ -337,23 +338,38 @@ class _OptionsParser(object):
 
   @staticmethod
   def _GetXcodeVersionString():
-    """Returns Xcode version info from the environment as a string."""
-    xcodebuild_bin = os.path.join(os.environ["SYSTEM_DEVELOPER_BIN_DIR"], "xcodebuild")
-    # Expect something like this
-    # ['Xcode 11.2.1', 'Build version 11B500', '']
-    # This command is a couple hundred MS to run and should be removed. On
-    # Xcode 11.2.1 Xcode uses the wrong # version, although version.plist is
-    # correct.
-    process = subprocess.Popen([xcodebuild_bin, "-version"], stdout=subprocess.PIPE)
-    process.wait()
-
-    if process.returncode != 0:
-      _PrintXcodeWarning('Can\'t find xcode version')
+    """Returns Xcode version info from the Xcode's version.plist.
+    Just reading XCODE_VERSION_ACTUAL from the environment seems like
+    a more reasonable implementation, but has shown to be unreliable,
+    at least when using Xcode 11.3.1 and opening the project within an
+    Xcode workspace.
+    """
+    developer_dir = os.environ['DEVELOPER_DIR']
+    app_dir = developer_dir.split('.app')[0] + '.app'
+    version_plist_path = os.path.join(app_dir, 'Contents', 'version.plist')
+    try:
+      with open(version_plist_path, 'rb') as f:
+        plist = plistlib.load(f)
+    except IOError:
+      _PrintXcodeWarning('Tulsi cannot determine Xcode version, error '
+                         'reading from {}'.format(version_plist_path))
+      return None
+    try:
+      # Example: "11.3.1", "11.3", "11.0"
+      key = 'CFBundleShortVersionString'
+      version_string = plist[key]
+    except KeyError:
+      _PrintXcodeWarning('Tulsi cannot determine Xcode version from {}, no '
+                         '"{}" key'.format(version_plist_path, key))
       return None
 
-    output = process.stdout.read()
-    lines = output.split("\n")
-    return lines[0].split(" ")[1]
+    # But we need to normalize to major.minor.patch, e.g. 11.3.0 or
+    # 11.0.0, so add one or two ".0" if needed (two just in case
+    # there is ever just a single version number like "12")
+    dots_count = version_string.count('.')
+    dot_zeroes_to_add = 2 - dots_count
+    version_string += '.0' * dot_zeroes_to_add
+    return version_string
 
   @staticmethod
   def _ComputeXcodeVersionFlag():
