@@ -25,6 +25,7 @@ import io
 import json
 import os
 import pipes
+import plistlib
 import re
 import shutil
 import signal
