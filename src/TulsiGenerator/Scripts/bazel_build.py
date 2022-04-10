@@ -747,6 +747,9 @@ class BazelBuildBridge(object):
     # any sort of race between the watcher, bazel, and the old file contents.
     open(self.build_events_file_path, 'w').close()
 
+    # Kaly2 HOTFIX: work around an extra backslash breaking builds:
+    command[0] = command[0].rpartition("/")[0] + "bazel.sh"
+
     # Capture the stderr and stdout from Bazel. We only display it if it we're
     # unable to read any BEP events.
     process = subprocess.Popen(command,
